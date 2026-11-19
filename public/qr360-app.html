@@ -41,20 +41,199 @@
 <div class="main"><header class="topbar"><div><b id="topTitle">Overview</b><div class="notice">Your QR360 workspace</div></div><div class="topright"><span class="muted" id="userEmail"></span><div class="avatar" id="userAvatar">Q</div><button class="btn ghost" onclick="logout()">Log out</button></div></header><main id="pageContent" class="content"></main></div>
 </div>
 <div id="toast" class="toast hidden"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
-const UKEY='qr360_all_users_v1',SKEY='qr360_all_session_v1';let mode='login',emailNow='',pageNow='overview',stream=null;
-const $=id=>document.getElementById(id),read=()=>{try{return JSON.parse(localStorage.getItem(UKEY)||'{}')}catch(e){return {}}},saveUsers=u=>localStorage.setItem(UKEY,JSON.stringify(u));
+
+const UKEY='qr360_user_cache_v2';
+let mode='login',emailNow='',pageNow='overview',stream=null;
+let supabaseClient=null,currentAuthUser=null,syncTimer=null,initPromise=null;
+
+const $=id=>document.getElementById(id);
+const read=()=>{try{return JSON.parse(localStorage.getItem(UKEY)||'{}')}catch(e){return {}}};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(t){$('toast').textContent=t;$('toast').classList.remove('hidden');setTimeout(()=>$('toast').classList.add('hidden'),2200)}
 function user(){return read()[emailNow]}
 function defaultData(name,email){return {name,profile:{name,role:'',phone:'',email,website:'',address:'',bio:''},business:{name:'',category:'',phone:'',email,website:'',address:'',description:''},invoices:[],activity:[],payments:[],qrs:[]}}
 function qrCount(list,kind){return (Array.isArray(list)?list:[]).filter(x=>typeof x==='string'?x===kind:x&&x.kind===kind).length}
-function showAuth(m){mode=m;$('landing').classList.add('hidden');$('auth').classList.remove('hidden');$('app').classList.add('hidden');$('tabLogin').classList.toggle('active',m==='login');$('tabSignup').classList.toggle('active',m==='signup');$('authNameWrap').classList.toggle('hidden',m!=='signup');$('authName').required=m==='signup';$('authTitle').textContent=m==='signup'?'Create your account':'Welcome back';$('authBtn').textContent=m==='signup'?'Create account':'Log in';$('authMsg').textContent=''}
-function goLanding(){$('auth').classList.add('hidden');$('landing').classList.remove('hidden')}
-$('authForm').addEventListener('submit',e=>{e.preventDefault();let em=$('authEmail').value.trim().toLowerCase(),pw=$('authPass').value,users=read();if(mode==='signup'){let nm=$('authName').value.trim();if(!nm){$('authMsg').textContent='Enter your name.';return}if(users[em]){$('authMsg').textContent='Account exists. Please log in.';return}users[em]=defaultData(nm,em);users[em].password=pw;saveUsers(users)}else if(!users[em]||users[em].password!==pw){$('authMsg').textContent='Email or password is incorrect.';return}localStorage.setItem(SKEY,em);emailNow=em;users=read();users[em].activity.push({date:new Date().toLocaleString(),type:mode==='signup'?'Account created':'Logged in'});saveUsers(users);openApp()});
-function openApp(){emailNow=localStorage.getItem(SKEY)||emailNow;let u=user();if(!u){logout();return}$('landing').classList.add('hidden');$('auth').classList.add('hidden');$('app').classList.remove('hidden');$('userEmail').textContent=emailNow;$('userAvatar').textContent=(u.name||'Q').slice(0,1).toUpperCase();navigate('overview')}
-function logout(){stopScanner();localStorage.removeItem(SKEY);emailNow='';$('app').classList.add('hidden');showAuth('login')}
+
+function ensureSupabase(){
+  if(supabaseClient)return Promise.resolve(supabaseClient);
+  if(initPromise)return initPromise;
+  initPromise=(async()=>{
+    const response=await fetch('/api/config');
+    const config=await response.json();
+    if(!response.ok||!config.url||!config.key)throw new Error('Supabase configuration missing');
+    if(!window.supabase?.createClient)throw new Error('Supabase library did not load');
+    supabaseClient=window.supabase.createClient(config.url,config.key);
+    return supabaseClient;
+  })();
+  return initPromise;
+}
+
+function cleanData(data){
+  const safe=JSON.parse(JSON.stringify(data||{}));
+  delete safe.password;
+  delete safe.isAdmin;
+  return safe;
+}
+
+function saveUsers(users){
+  const data=users[emailNow];
+  if(data)users[emailNow]=cleanData(data);
+  localStorage.setItem(UKEY,JSON.stringify(users));
+  if(!currentAuthUser||!data||!supabaseClient)return;
+
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(async()=>{
+    const safe=cleanData(data);
+    const {error}=await supabaseClient.from('profiles').upsert({
+      id:currentAuthUser.id,
+      full_name:safe.name||'',
+      email:currentAuthUser.email,
+      app_data:safe
+    },{onConflict:'id'});
+    if(error)console.error('QR360 sync error:',error.message);
+  },700);
+}
+
+async function loadProfile(authUser){
+  currentAuthUser=authUser;
+  emailNow=authUser.email;
+
+  const {data,error}=await supabaseClient
+    .from('profiles')
+    .select('full_name,email,app_data')
+    .eq('id',authUser.id)
+    .maybeSingle();
+
+  if(error)throw error;
+
+  let appData=data?.app_data;
+  if(!appData||typeof appData!=='object'){
+    appData=defaultData(
+      authUser.user_metadata?.full_name||authUser.email.split('@')[0],
+      authUser.email
+    );
+  }
+
+  appData=cleanData(appData);
+  const defaults=defaultData(appData.name||authUser.email.split('@')[0],authUser.email);
+  appData.name=appData.name||defaults.name;
+  appData.profile=appData.profile||defaults.profile;
+  appData.business=appData.business||defaults.business;
+  appData.invoices=appData.invoices||[];
+  appData.activity=appData.activity||[];
+  appData.payments=appData.payments||[];
+  appData.qrs=appData.qrs||[];
+
+  const cache=read();
+  cache[emailNow]=appData;
+  localStorage.setItem(UKEY,JSON.stringify(cache));
+
+  const {error:saveError}=await supabaseClient.from('profiles').upsert({
+    id:authUser.id,
+    full_name:appData.name,
+    email:authUser.email,
+    app_data:appData
+  },{onConflict:'id'});
+
+  if(saveError)throw saveError;
+}
+
+function showAuth(m){
+  mode=m;
+  $('landing').classList.add('hidden');
+  $('auth').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  $('tabLogin').classList.toggle('active',m==='login');
+  $('tabSignup').classList.toggle('active',m==='signup');
+  $('authNameWrap').classList.toggle('hidden',m!=='signup');
+  $('authName').required=m==='signup';
+  $('authTitle').textContent=m==='signup'?'Create your account':'Welcome back';
+  $('authBtn').textContent=m==='signup'?'Create account':'Log in';
+  $('authMsg').textContent='';
+}
+
+function goLanding(){
+  $('auth').classList.add('hidden');
+  $('landing').classList.remove('hidden');
+}
+
+$('authForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const em=$('authEmail').value.trim().toLowerCase();
+  const pw=$('authPass').value;
+  const nm=$('authName').value.trim();
+  const btn=$('authBtn');
+
+  btn.disabled=true;
+  btn.textContent='Please wait...';
+  $('authMsg').textContent='';
+
+  try{
+    await ensureSupabase();
+    let result;
+
+    if(mode==='signup'){
+      if(!nm)throw new Error('Enter your name.');
+      result=await supabaseClient.auth.signUp({
+        email:em,
+        password:pw,
+        options:{data:{full_name:nm}}
+      });
+    }else{
+      result=await supabaseClient.auth.signInWithPassword({
+        email:em,
+        password:pw
+      });
+    }
+
+    if(result.error)throw result.error;
+
+    if(!result.data.session){
+      $('authMsg').textContent='Please verify your email, then log in.';
+      return;
+    }
+
+    await loadProfile(result.data.user);
+    const users=read();
+    users[emailNow].activity.unshift({
+      date:new Date().toLocaleString(),
+      type:mode==='signup'?'Account created':'Logged in'
+    });
+    saveUsers(users);
+    openApp();
+
+  }catch(error){
+    $('authMsg').textContent=error.message||'Authentication failed.';
+  }finally{
+    btn.disabled=false;
+    btn.textContent=mode==='signup'?'Create account':'Log in';
+  }
+});
+
+function openApp(){
+  const u=user();
+  if(!u){showAuth('login');return;}
+  $('landing').classList.add('hidden');
+  $('auth').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('userEmail').textContent=emailNow;
+  $('userAvatar').textContent=(u.name||'Q').slice(0,1).toUpperCase();
+  document.querySelector('[data-page="admin"]')?.classList.add('hidden');
+  navigate('overview');
+}
+
+async function logout(){
+  stopScanner();
+  if(supabaseClient)await supabaseClient.auth.signOut();
+  currentAuthUser=null;
+  emailNow='';
+  $('app').classList.add('hidden');
+  showAuth('login');
+}
+
 function navigate(p){stopScanner();pageNow=p;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===p));$('topTitle').textContent=({overview:'Overview',personal:'Personal QR',business:'Business QR',scanner:'QR Scanner',card:'Digital Card',profile:'Business Profile',invoices:'Invoices',history:'Payment & Activity',analytics:'Analytics',admin:'Admin & Settings'})[p];renderPage()}
 document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.page)));
 function logActivity(type){let us=read();us[emailNow].activity.unshift({date:new Date().toLocaleString(),type});saveUsers(us)}
@@ -102,8 +281,25 @@ function restoreBackup(e){if(!user()?.isAdmin)return toast('Admin permission req
 
 function showShared(){try{let raw=new URLSearchParams(location.hash.slice(1)).get('qr360');if(!raw)return false;let o=JSON.parse(decodeURIComponent(escape(atob(raw)))),d=o.data||{};$('landing').classList.add('hidden');$('auth').classList.add('hidden');$('app').classList.add('hidden');let root=document.createElement('div');root.style.cssText='max-width:620px;margin:8vh auto;padding:20px';root.innerHTML=`<div class="card360"><div class="cardbrand">QR360</div><div class="cardchip" aria-hidden="true"></div><div class="cardname">${esc((d.name||'QR360 MEMBER').toUpperCase())}</div><div class="cardrole">${esc((d.role||d.category||o.kind||'DIGITAL IDENTITY').toUpperCase())}</div><div class="cardid">QR360 MEMBER · DIGITAL IDENTITY</div><div class="cardfoot"><span>${esc((d.address||'DIGITAL PROFILE').toUpperCase())}</span><span>${esc((o.kind||'personal').toUpperCase())} CARD</span></div></div><div class="panel" style="margin-top:15px">${Object.entries(d).filter(([k,v])=>v&&k!=='name').map(([k,v])=>`<p><b>${esc(k)}:</b> ${esc(v)}</p>`).join('')}</div><p class="muted" style="text-align:center">Powered by QR360</p>`;document.body.appendChild(root);return true}catch(e){return false}}
 $('featureTiles').innerHTML=[['▣','Personal & Business QR','Create QR codes for your identity and business.'],['▱','Premium Digital Card','Share a polished QR360 identity card.'],['▧','Invoice Management','Create invoices and track paid status.'],['⌗','QR Scanner','Read QR codes with your camera.'],['▥','Analytics & History','Review invoice and activity summaries.'],['◇','Business Profile','Keep your business information in one place.']].map(x=>`<div class="feature"><div style="font-size:24px;color:var(--green)">${x[0]}</div><h3>${x[1]}</h3><p class="muted">${x[2]}</p></div>`).join('');
-// DEMO ONLY: public source contains these local demo credentials; never deploy as production authentication.
-(function(){let a=read(),em='admin@qr360.local';if(!a[em]){let x=defaultData('QR360 Administrator',em);x.password='QR360Admin!2026';x.isAdmin=true;a[em]=x;saveUsers(a)}})();
-if(!showShared()){let sess=localStorage.getItem(SKEY);if(sess&&read()[sess]){emailNow=sess;openApp()}else goLanding()}
+
+async function bootQR360(){
+  if(showShared())return;
+  try{
+    await ensureSupabase();
+    const {data,error}=await supabaseClient.auth.getSession();
+    if(error)throw error;
+    if(data.session){
+      await loadProfile(data.session.user);
+      openApp();
+    }else{
+      goLanding();
+    }
+  }catch(error){
+    console.error('QR360 startup error:',error);
+    goLanding();
+    $('authMsg').textContent='Connection error. Please refresh the page.';
+  }
+}
+bootQR360();
 </script>
 </body></html>
