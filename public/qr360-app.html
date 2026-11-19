@@ -36,7 +36,7 @@
 <button data-page="history"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span><span class="navtext">Payment & Activity</span></button>
 <button data-page="analytics"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-8M22 20H2"/></svg></span><span class="navtext">Analytics</span></button>
 <div class="navlabel">SYSTEM</div>
-<button data-page="admin"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2 2.2 3-.2.9 2.9 2.6 1.5-1 2.8 1 2.8-2.6 1.5-.9 2.9-3-.2L12 21l-2-2.2-3 .2-.9-2.9-2.6-1.5 1-2.8-1-2.8 2.6-1.5.9-2.9 3 .2z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="navtext">Admin & Settings</span></button>
+<button data-page="admin"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2 2.2 3-.2.9 2.9 2.6 1.5-1 2.8 1 2.8-2.6 1.5-.9 2.9-3-.2L12 21l-2-2.2-3 .2-.9-2.9-2.6-1.5 1-2.8-1-2.8 2.6-1.5.9-2.9 3 .2z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="navtext">Settings</span></button>
 </nav><div class="sidefoot">QR360 Platform<br>Complete demo v1.1</div></aside>
 <div class="main"><header class="topbar"><div><b id="topTitle">Overview</b><div class="notice">Your QR360 workspace</div></div><div class="topright"><span class="muted" id="userEmail"></span><div class="avatar" id="userAvatar">Q</div><button class="btn ghost" onclick="logout()">Log out</button></div></header><main id="pageContent" class="content"></main></div>
 </div>
@@ -47,7 +47,7 @@
 
 const UKEY='qr360_user_cache_v2';
 let mode='login',emailNow='',pageNow='overview',stream=null;
-let supabaseClient=null,currentAuthUser=null,syncTimer=null,initPromise=null;
+let supabaseClient=null,currentAuthUser=null,cloudSaveQueue=Promise.resolve(),initPromise=null;
 
 const $=id=>document.getElementById(id);
 const read=()=>{try{return JSON.parse(localStorage.getItem(UKEY)||'{}')}catch(e){return {}}};
@@ -79,22 +79,33 @@ function cleanData(data){
 }
 
 function saveUsers(users){
-  const data=users[emailNow];
-  if(data)users[emailNow]=cleanData(data);
+  let data=users[emailNow];
+  if(data){
+    data=cleanData(data);
+    users[emailNow]=data;
+  }
   localStorage.setItem(UKEY,JSON.stringify(users));
-  if(!currentAuthUser||!data||!supabaseClient)return;
 
-  clearTimeout(syncTimer);
-  syncTimer=setTimeout(async()=>{
-    const safe=cleanData(data);
-    const {error}=await supabaseClient.from('profiles').upsert({
-      id:currentAuthUser.id,
-      full_name:safe.name||'',
-      email:currentAuthUser.email,
-      app_data:safe
-    },{onConflict:'id'});
-    if(error)console.error('QR360 sync error:',error.message);
-  },700);
+  if(!currentAuthUser||!data||!supabaseClient)return cloudSaveQueue;
+
+  const payload={
+    id:currentAuthUser.id,
+    full_name:data.name||'',
+    email:currentAuthUser.email,
+    app_data:JSON.parse(JSON.stringify(data))
+  };
+
+  cloudSaveQueue=cloudSaveQueue.then(async()=>{
+    const {error}=await supabaseClient.from('profiles').upsert(
+      payload,{onConflict:'id'}
+    );
+    if(error)throw error;
+  }).catch(error=>{
+    console.error('QR360 sync error:',error.message);
+    toast('Cloud save failed. Check your connection.');
+  });
+
+  return cloudSaveQueue;
 }
 
 async function loadProfile(authUser){
@@ -221,12 +232,13 @@ function openApp(){
   $('app').classList.remove('hidden');
   $('userEmail').textContent=emailNow;
   $('userAvatar').textContent=(u.name||'Q').slice(0,1).toUpperCase();
-  document.querySelector('[data-page="admin"]')?.classList.add('hidden');
+  
   navigate('overview');
 }
 
 async function logout(){
   stopScanner();
+  await cloudSaveQueue;
   if(supabaseClient)await supabaseClient.auth.signOut();
   currentAuthUser=null;
   emailNow='';
@@ -234,7 +246,7 @@ async function logout(){
   showAuth('login');
 }
 
-function navigate(p){stopScanner();pageNow=p;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===p));$('topTitle').textContent=({overview:'Overview',personal:'Personal QR',business:'Business QR',scanner:'QR Scanner',card:'Digital Card',profile:'Business Profile',invoices:'Invoices',history:'Payment & Activity',analytics:'Analytics',admin:'Admin & Settings'})[p];renderPage()}
+function navigate(p){stopScanner();pageNow=p;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===p));$('topTitle').textContent=({overview:'Overview',personal:'Personal QR',business:'Business QR',scanner:'QR Scanner',card:'Digital Card',profile:'Business Profile',invoices:'Invoices',history:'Payment & Activity',analytics:'Analytics',admin:'Settings'})[p];renderPage()}
 document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.page)));
 function logActivity(type){let us=read();us[emailNow].activity.unshift({date:new Date().toLocaleString(),type});saveUsers(us)}
 function qrUrl(kind,data){let base=location.href.split('#')[0];let payload={kind,data};return base+'#qr360='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(payload)))))}
@@ -254,7 +266,7 @@ else if(pageNow==='scanner'){html=`<div class="pagehead"><div><div class="eyebro
 else if(pageNow==='invoices'){html=`<div class="pagehead"><div><div class="eyebrow">Business tools</div><h1>Invoices</h1><div class="muted">Create, track, print and save customer invoices.</div></div></div><div class="grid two"><section class="panel"><h2>Create invoice</h2><form id="invoiceForm"><div class="field"><label>Customer name</label><input name="customer" required></div><div class="formrow"><div class="field"><label>Invoice number</label><input name="number" value="INV-${String(Date.now()).slice(-6)}" required></div><div class="field"><label>Due date</label><input name="due" type="date"></div></div><div class="field"><label>Description / item</label><input name="item" required></div><div class="formrow"><div class="field"><label>Quantity</label><input name="qty" type="number" min="1" value="1" required></div><div class="field"><label>Unit price (BDT)</label><input name="price" type="number" min="0" step=".01" required></div></div><button class="btn">Save invoice</button></form></section><section class="panel"><h2>Invoice history</h2>${invoiceTable(u.invoices)}</section></div>`}
 else if(pageNow==='history'){html=`<div class="pagehead"><div><div class="eyebrow">Records</div><h1>Payment & Activity History</h1><div class="muted">Review payment records and workspace activity.</div></div></div><div class="grid two"><section class="panel"><h2>Payment history</h2>${paymentTable(u.payments)}</section><section class="panel"><h2>Activity history</h2>${activityTable(u.activity)}</section></div><p class="notice" style="margin-top:15px">Payment records are manually tracked in this prototype. No real money is processed.</p>`}
 else if(pageNow==='analytics'){let total=u.invoices.reduce((s,x)=>s+x.total,0),paid=u.invoices.filter(x=>x.status==='Paid').reduce((s,x)=>s+x.total,0);html=`<div class="pagehead"><div><div class="eyebrow">Insights</div><h1>Analytics</h1><div class="muted">A snapshot of your QR and invoice activity.</div></div></div><div class="grid stats"><div class="panel"><div class="statlabel">Total invoices value</div><div class="statnum">৳${total.toFixed(2)}</div></div><div class="panel"><div class="statlabel">Paid value</div><div class="statnum">৳${paid.toFixed(2)}</div></div><div class="panel"><div class="statlabel">Unpaid value</div><div class="statnum">৳${(total-paid).toFixed(2)}</div></div><div class="panel"><div class="statlabel">Activity count</div><div class="statnum">${u.activity.length}</div></div></div><div class="panel"><h2>Invoice status</h2><div style="display:flex;gap:12px;align-items:center;margin-top:20px"><div style="height:12px;flex:1;background:#263b30;border-radius:20px;overflow:hidden"><div style="height:100%;width:${total?paid/total*100:0}%;background:var(--green)"></div></div><b>${total?Math.round(paid/total*100):0}% paid value</b></div><p class="notice">Analytics are calculated from the invoices saved in this browser.</p></div>`}
-else if(pageNow==='admin'){let all=read(),entries=Object.entries(all).filter(([k,v])=>!v.isAdmin),isAdmin=!!u.isAdmin;html=`<div class="pagehead"><div><div class="eyebrow">Control center</div><h1>Admin Panel</h1><div class="muted">Manage local demo users, review platform totals and back up data.</div></div><span class="pill">${isAdmin?'ADMINISTRATOR':'ACCOUNT SETTINGS'}</span></div>${isAdmin?`<div class="grid stats"><div class="panel"><div class="statlabel">Registered users</div><div class="statnum">${entries.length}</div></div><div class="panel"><div class="statlabel">Invoices</div><div class="statnum">${entries.reduce((s,[k,x])=>s+(x.invoices||[]).length,0)}</div></div><div class="panel"><div class="statlabel">Activity events</div><div class="statnum">${entries.reduce((s,[k,x])=>s+(x.activity||[]).length,0)}</div></div><div class="panel"><div class="statlabel">Business profiles</div><div class="statnum">${entries.filter(([k,x])=>x.business?.name).length}</div></div></div><section class="panel"><div class="panelhead"><div><h2>User Management</h2><div class="notice">Search, inspect and delete local demo accounts.</div></div><input id="adminSearch" placeholder="Search name or email..." oninput="filterAdminUsers()" style="max-width:250px;background:#09150f;border:1px solid #34517a;color:var(--text);padding:10px;border-radius:9px"></div><div id="adminUserTable">${adminUserTable(entries)}</div></section><div class="grid two" style="margin-top:17px"><section class="panel"><h2>Data Backup</h2><p class="muted">Export or restore all local demo data.</p><button class="btn" onclick="exportBackup()">Export JSON backup</button> <button class="btn secondary" onclick="document.getElementById('restoreFile').click()">Restore backup</button><input id="restoreFile" type="file" accept="application/json" class="hidden" onchange="restoreBackup(event)"><p class="notice">Restore replaces local demo data. Export a backup first.</p></section><section class="panel"><h2>Platform modules</h2><p class="muted">Personal QR · Business QR · Scanner · Digital Card · Business Profile · Invoices · History · Analytics</p><p class="notice">Production roles, server-side user management, reports and audit logs require a backend.</p></section></div>`:`<div class="panel"><h2>Account settings</h2><p class="muted">Signed in as ${esc(emailNow)}. This account is not an administrator.</p><div class="field"><label>Display name</label><input id="settingName" value="${esc(u.name)}"></div><div class="field"><label>Current demo password</label><input id="currentPassword" type="password" autocomplete="current-password" placeholder="Required only to change password"></div><div class="field"><label>New password</label><input id="newPassword" type="password" minlength="8" autocomplete="new-password" placeholder="At least 8 characters"></div><button class="btn" onclick="saveSetting()">Save settings</button></div>`}<div class="panel" style="margin-top:17px"><h2>System status & safety</h2><p class="muted">QR360 Frontend Prototype v1.1 · Browser-local demo storage · No real payment processing</p><p class="notice">Not production-secure: no server database, secure authentication, real payment processing or cross-device user records. Do not store sensitive customer or financial data.</p><button class="btn danger" onclick="clearMyData()">Delete my local demo data</button></div>`}
+else if(pageNow==='admin'){html=`<div class="pagehead"><div><div class="eyebrow">QR360 ACCOUNT</div><h1>Account Settings</h1><div class="muted">Manage your account and security.</div></div><span class="pill">ACCOUNT</span></div><div class="panel"><h2>Profile Settings</h2><p class="muted">Signed in as ${esc(emailNow)}.</p><div class="field"><label>Display name</label><input id="settingName" value="${esc(u.name)}"></div><p class="notice">Leave the new password empty if you do not want to change it.</p><div class="field"><label>New password</label><input id="newPassword" type="password" minlength="8" autocomplete="new-password" placeholder="At least 8 characters"></div><button class="btn" onclick="saveSetting()">Save settings</button></div><div class="panel" style="margin-top:17px"><h2>System Status & Safety</h2><p class="muted">Supabase Authentication · Cloud Profile Storage · No real payment processing</p><p class="notice">Your QR360 profile data is stored in Supabase. Payment processing is not enabled.</p><button class="btn danger" onclick="clearMyData()">Delete my QR360 data</button></div>`}
 $('pageContent').innerHTML=html;bindPageForms();if(pageNow==='personal'||pageNow==='business')previewQR(pageNow)}
 function cardMarkup(p){return `<div class="card360"><div class="cardbrand">QR360</div><div class="cardchip" aria-hidden="true"></div><div class="cardname">${esc((p.name||'YOUR NAME').toUpperCase())}</div><div class="cardrole">${esc((p.role||'DIGITAL IDENTITY').toUpperCase())}</div><div class="cardid">QR360 MEMBER · PERSONAL IDENTITY</div><div class="cardfoot"><span>${esc((p.address||'DIGITAL PROFILE').toUpperCase())}</span><span>QR360</span></div></div>`}
 function activityTable(a){if(!a?.length)return '<div class="empty">No activity yet.</div>';return `<div class="tablewrap"><table><thead><tr><th>Activity</th><th>Date</th></tr></thead><tbody>${a.map(x=>`<tr><td>${esc(x.type)}</td><td>${esc(x.date)}</td></tr>`).join('')}</tbody></table></div>`}
@@ -266,19 +278,18 @@ let inv=$('invoiceForm');if(inv)inv.addEventListener('submit',e=>{e.preventDefau
 function togglePaid(i){let us=read(),inv=us[emailNow].invoices[i];if(!inv)return;inv.status=inv.status==='Paid'?'Unpaid':'Paid';if(inv.status==='Paid')us[emailNow].payments.unshift({number:inv.number,amount:inv.total,date:new Date().toLocaleString()});else us[emailNow].payments=us[emailNow].payments.filter(x=>x.number!==inv.number);us[emailNow].activity.unshift({date:new Date().toLocaleString(),type:'Invoice '+inv.number+' marked '+inv.status});saveUsers(us);renderPage();toast('Invoice status updated')}
 function deleteInvoice(i){let us=read(),inv=us[emailNow].invoices[i];if(!inv)return;if(!confirm('Delete invoice '+inv.number+'?'))return;us[emailNow].invoices.splice(i,1);us[emailNow].payments=us[emailNow].payments.filter(x=>x.number!==inv.number);us[emailNow].activity.unshift({date:new Date().toLocaleString(),type:'Invoice '+inv.number+' deleted'});saveUsers(us);renderPage();toast('Invoice deleted')}
 function printInvoice(i){let x=user().invoices[i],w=window.open('','_blank');if(!w){toast('Allow pop-ups to print invoice');return}w.document.write(`<html><head><title>${esc(x.number)}</title><style>body{font:16px Arial;padding:40px;color:#17251d}h1{color:#2c8a5b}table{width:100%;border-collapse:collapse;margin-top:25px}td,th{padding:12px;border-bottom:1px solid #ddd;text-align:left}</style></head><body><h1>QR360 INVOICE</h1><h2>${esc(x.number)}</h2><p>Customer: ${esc(x.customer)}</p><p>Date: ${esc(x.date)} · Due: ${esc(x.due||'—')}</p><table><tr><th>Description</th><th>Qty</th><th>Unit price</th><th>Total</th></tr><tr><td>${esc(x.item)}</td><td>${x.qty}</td><td>৳${x.price.toFixed(2)}</td><td>৳${x.total.toFixed(2)}</td></tr></table><h2>Amount due: ৳${x.total.toFixed(2)}</h2><p>Status: ${x.status}</p><p>Generated with QR360</p><script>window.print()<\/script></body></html>`);w.document.close()}
-function saveSetting(){let us=read(),a=us[emailNow],next=$('newPassword')?.value||'',current=$('currentPassword')?.value||'';a.name=$('settingName')?.value.trim()||a.name;if(next){if(current!==a.password){toast('Current password is incorrect');return}if(next.length<8){toast('New password must be at least 8 characters');return}a.password=next}saveUsers(us);toast('Settings saved');openApp()}
-function clearMyData(){if(!confirm('Delete your local QR360 demo account and all its data from this browser?'))return;let us=read();delete us[emailNow];saveUsers(us);logout()}
+async function saveSetting(){const us=read();const a=us[emailNow];const next=$("newPassword")?.value||"";if(!a)return;a.name=$("settingName")?.value.trim()||a.name;if(next){if(next.length<8){toast("New password must be at least 8 characters");return;}const {error}=await supabaseClient.auth.updateUser({password:next});if(error){toast("Password update failed: "+error.message);return;}}saveUsers(us);toast("Settings saved");openApp();}
+async function clearMyData(){if(!confirm("Delete your QR360 profile and all saved app data? Your login account will remain."))return;if(!currentAuthUser||!supabaseClient){toast("Authentication unavailable");return;}const {error}=await supabaseClient.from("profiles").delete().eq("id",currentAuthUser.id);if(error){toast("Delete failed: "+error.message);return;}const us=read();delete us[emailNow];localStorage.setItem(UKEY,JSON.stringify(us));await logout();toast("QR360 profile data deleted");}
 async function startScanner(){let v=$('video');if(!v)return;if(!('BarcodeDetector'in window)){toast('BarcodeDetector is not supported in this browser. Paste QR text instead.');return}try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});v.srcObject=stream;let detector=new BarcodeDetector({formats:['qr_code']});const scan=async()=>{if(!stream||pageNow!=='scanner')return;try{let codes=await detector.detect(v);if(codes.length){$('scanText').value=codes[0].rawValue;processScan(codes[0].rawValue);stopScanner();return}}catch(e){}requestAnimationFrame(scan)};requestAnimationFrame(scan)}catch(e){toast('Camera permission denied or unavailable')}}
 function stopScanner(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}}
 function processScan(txt){let box=$('scanResult');if(!box)return;try{let url=new URL(txt);let payload=new URLSearchParams(url.hash.slice(1)).get('qr360');if(payload){let obj=JSON.parse(decodeURIComponent(escape(atob(payload))));box.innerHTML=`<div class="panel"><span class="pill">${esc(obj.kind)} QR</span><h2 style="margin-top:10px">${esc(obj.data.name||'QR360 profile')}</h2>${Object.entries(obj.data).filter(([k,v])=>v&&k!=='bio').map(([k,v])=>`<p><b>${esc(k)}:</b> ${esc(v)}</p>`).join('')}<p>${esc(obj.data.bio||'')}</p></div>`;logActivity('QR scanned');return}}catch(e){}box.innerHTML=`<div class="panel"><p class="muted">Scanned content</p><p style="overflow-wrap:anywhere">${esc(txt)}</p>${/^https?:\/\//i.test(txt)?`<a class="btn secondary" target="_blank" rel="noopener" href="${esc(txt)}">Open link</a>`:''}</div>`}
 
 function adminUserTable(entries){if(!entries.length)return '<div class="empty">No users found.</div>';return `<div class="tablewrap"><table><thead><tr><th>User</th><th>Email</th><th>Invoices</th><th>Activity</th><th>Action</th></tr></thead><tbody>${entries.map(([em,x])=>`<tr><td>${esc(x.name||'Unnamed')}</td><td>${esc(em)}</td><td>${(x.invoices||[]).length}</td><td>${(x.activity||[]).length}</td><td><button class="btn secondary" onclick="inspectAdminUser('${encodeURIComponent(em)}')">View</button> <button class="btn danger" onclick="removeAdminUser('${encodeURIComponent(em)}')">Delete</button></td></tr>`).join('')}</tbody></table></div>`}
-function filterAdminUsers(){let q=($('adminSearch')?.value||'').toLowerCase(),e=Object.entries(read()).filter(([em,x])=>!x.isAdmin&&(em.includes(q)||(x.name||'').toLowerCase().includes(q)));$('adminUserTable').innerHTML=adminUserTable(e)}
-function inspectAdminUser(k){let em=decodeURIComponent(k),x=read()[em];if(!x)return toast('User not found');alert('Name: '+(x.name||'')+'\\nEmail: '+em+'\\nInvoices: '+(x.invoices||[]).length+'\\nActivity: '+(x.activity||[]).length+'\\nBusiness: '+(x.business?.name||'Not set'))}
-function removeAdminUser(k){let em=decodeURIComponent(k);if(!user()?.isAdmin)return toast('Admin permission required');if(!confirm('Delete demo account '+em+'?'))return;let a=read();delete a[em];saveUsers(a);logActivity('Admin deleted demo account '+em);renderPage();toast('Demo user deleted')}
-function exportBackup(){if(!user()?.isAdmin)return toast('Admin permission required');let b=new Blob([JSON.stringify({product:'QR360 demo backup',exportedAt:new Date().toISOString(),users:read()},null,2)],{type:'application/json'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download='qr360-backup.json';a.click();URL.revokeObjectURL(u);toast('Backup exported')}
-function restoreBackup(e){if(!user()?.isAdmin)return toast('Admin permission required');let f=e.target.files?.[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let d=JSON.parse(r.result);if(!d.users||typeof d.users!=='object'||Array.isArray(d.users))throw 0;if(!confirm('Replace all local demo data with this backup?'))return;saveUsers(d.users);openApp();toast('Backup restored')}catch(x){toast('Invalid backup file')}};r.readAsText(f)}
-
+function filterAdminUsers(){toast("Admin tools are disabled until secure admin roles are configured");}
+function inspectAdminUser(){toast("Admin tools are disabled");}
+function removeAdminUser(){toast("Admin tools are disabled");}
+function exportBackup(){toast("Admin backup is temporarily disabled");}
+function restoreBackup(){toast("Admin restore is temporarily disabled");}
 function showShared(){try{let raw=new URLSearchParams(location.hash.slice(1)).get('qr360');if(!raw)return false;let o=JSON.parse(decodeURIComponent(escape(atob(raw)))),d=o.data||{};$('landing').classList.add('hidden');$('auth').classList.add('hidden');$('app').classList.add('hidden');let root=document.createElement('div');root.style.cssText='max-width:620px;margin:8vh auto;padding:20px';root.innerHTML=`<div class="card360"><div class="cardbrand">QR360</div><div class="cardchip" aria-hidden="true"></div><div class="cardname">${esc((d.name||'QR360 MEMBER').toUpperCase())}</div><div class="cardrole">${esc((d.role||d.category||o.kind||'DIGITAL IDENTITY').toUpperCase())}</div><div class="cardid">QR360 MEMBER · DIGITAL IDENTITY</div><div class="cardfoot"><span>${esc((d.address||'DIGITAL PROFILE').toUpperCase())}</span><span>${esc((o.kind||'personal').toUpperCase())} CARD</span></div></div><div class="panel" style="margin-top:15px">${Object.entries(d).filter(([k,v])=>v&&k!=='name').map(([k,v])=>`<p><b>${esc(k)}:</b> ${esc(v)}</p>`).join('')}</div><p class="muted" style="text-align:center">Powered by QR360</p>`;document.body.appendChild(root);return true}catch(e){return false}}
 $('featureTiles').innerHTML=[['▣','Personal & Business QR','Create QR codes for your identity and business.'],['▱','Premium Digital Card','Share a polished QR360 identity card.'],['▧','Invoice Management','Create invoices and track paid status.'],['⌗','QR Scanner','Read QR codes with your camera.'],['▥','Analytics & History','Review invoice and activity summaries.'],['◇','Business Profile','Keep your business information in one place.']].map(x=>`<div class="feature"><div style="font-size:24px;color:var(--green)">${x[0]}</div><h3>${x[1]}</h3><p class="muted">${x[2]}</p></div>`).join('');
 
